@@ -1,3 +1,6 @@
+#![feature(nll)]
+
+use std::cmp;
 use std::collections::BTreeMap;
 
 extern crate rand;
@@ -13,26 +16,32 @@ enum Id<SiteId> {
     Site(SiteId),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Key<SiteId>(Vec<(usize, Id<SiteId>)>);
+#[derive(Clone, Debug, Hash)]
+pub struct Key<SiteId> {
+    position: Vec<(usize, Id<SiteId>)>,
+    /// comparison of keys doesn't take clock into account
+    clock: usize,
+}
 
-impl<SiteId: Ord> std::cmp::Ord for Key<SiteId> {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        use std::cmp::Ordering::*;
-        let max_level = self.0.len().max(other.0.len());
+impl<SiteId: Ord> cmp::Ord for Key<SiteId> {
+    fn cmp(&self, other: &Self) -> cmp::Ordering {
+        use cmp::Ordering::Equal;
+        use Id::Sentinel;
 
-        let mut lhs = self.0.iter();
-        let mut rhs = other.0.iter();
+        let max_level = self.position.len().max(other.position.len());
+
+        let mut lhs = self.position.iter();
+        let mut rhs = other.position.iter();
 
         for _ in 0..max_level {
             let left = lhs
                 .next()
                 .map(|item| (item.0, &item.1))
-                .unwrap_or_else(|| (0, &Id::Sentinel));
+                .unwrap_or_else(|| (0, &Sentinel));
             let right = rhs
                 .next()
                 .map(|item| (item.0, &item.1))
-                .unwrap_or_else(|| (0, &Id::Sentinel));
+                .unwrap_or_else(|| (0, &Sentinel));
 
             let cmp = left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1));
             if cmp != Equal {
@@ -44,9 +53,17 @@ impl<SiteId: Ord> std::cmp::Ord for Key<SiteId> {
     }
 }
 
-impl<SiteId: Ord> std::cmp::PartialOrd for Key<SiteId> {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+impl<SiteId: Ord> cmp::PartialOrd for Key<SiteId> {
+    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
         Some(self.cmp(other))
+    }
+}
+
+impl<SiteId: Eq> cmp::Eq for Key<SiteId> {}
+
+impl<SiteId: PartialEq> cmp::PartialEq for Key<SiteId> {
+    fn eq(&self, other: &Self) -> bool {
+        self.position == other.position
     }
 }
 
@@ -97,13 +114,14 @@ impl<SiteId: Ord + Clone> Key<SiteId> {
         &self,
         other: &Self,
         site_id: Id<SiteId>,
+        clock: usize,
         strategies: &mut Vec<InsertionStrategy>,
     ) -> Self {
         assert!(*self < *other);
 
         let mut rng = rand::thread_rng();
-        let mut lhs = self.0.iter();
-        let mut rhs = other.0.iter();
+        let mut lhs = self.position.iter();
+        let mut rhs = other.position.iter();
         let mut ret = vec![];
         let mut level = 0;
 
@@ -128,7 +146,11 @@ impl<SiteId: Ord + Clone> Key<SiteId> {
             }
         };
         ret.push((pos, site_id));
-        Key(ret)
+
+        Key {
+            position: ret,
+            clock,
+        }
     }
 }
 
@@ -153,28 +175,46 @@ impl Distribution<InsertionStrategy> for Standard {
 pub struct Document<SiteId, Value> {
     content: BTreeMap<Key<SiteId>, Option<Value>>,
     strategies: Vec<InsertionStrategy>,
-    current_level: usize,
+    clock: usize,
 }
 
 impl<SiteId: Ord + Clone + std::fmt::Debug, Value> Document<SiteId, Value> {
     pub fn new() -> Self {
         let mut content = BTreeMap::new();
-        content.insert(Key(vec![(0, Id::Sentinel)]), None);
-        content.insert(Key(vec![(INITIAL_WIDTH, Id::Sentinel)]), None);
+        content.insert(
+            Key {
+                position: vec![(0, Id::Sentinel)],
+                clock: 0,
+            },
+            None,
+        );
+        content.insert(
+            Key {
+                position: vec![(INITIAL_WIDTH, Id::Sentinel)],
+                clock: 0,
+            },
+            None,
+        );
 
         Document {
             content: content,
             strategies: vec![rand::random()],
-            current_level: 0,
+            clock: 2,
         }
     }
 
     pub fn start(&self) -> Key<SiteId> {
-        Key(vec![(0, Id::Sentinel)])
+        Key {
+            position: vec![(0, Id::Sentinel)],
+            clock: 0,
+        }
     }
 
     pub fn end(&self) -> Key<SiteId> {
-        Key(vec![(INITIAL_WIDTH, Id::Sentinel)])
+        Key {
+            position: vec![(INITIAL_WIDTH, Id::Sentinel)],
+            clock: 0,
+        }
     }
 
     pub fn insert(
@@ -184,7 +224,9 @@ impl<SiteId: Ord + Clone + std::fmt::Debug, Value> Document<SiteId, Value> {
         right: &Key<SiteId>,
         value: Value,
     ) -> Key<SiteId> {
-        let key = left.pick(right, Id::Site(site_id), &mut self.strategies);
+        use std::collections::btree_map::Entry::*;
+
+        let key = left.pick(right, Id::Site(site_id), self.clock, &mut self.strategies);
         assert!(
             left < &key && &key < right,
             "must hold {:?} < {:?} < {:?}",
@@ -192,11 +234,18 @@ impl<SiteId: Ord + Clone + std::fmt::Debug, Value> Document<SiteId, Value> {
             key,
             right
         );
-        assert!(
-            self.content.insert(key.clone(), Some(value)).is_none(),
-            "key collided: {:?}",
-            key
-        );
+
+        match self.content.entry(key.clone()) {
+            Vacant(v) => {
+                v.insert(Some(value));
+            }
+            Occupied(o) => {
+                let (old, _) = o.remove_entry();
+                assert!(old.position == key.position && old.clock < key.clock);
+                self.content.insert(key.clone(), Some(value));
+            }
+        }
+        self.clock += 1;
         key
     }
 
@@ -216,7 +265,10 @@ mod test {
 
     #[test]
     fn test_equality() {
-        let key = Key(vec![(1, Id::Site(())), (4, Id::Site(()))]);
+        let key = Key {
+            position: vec![(1, Id::Site(())), (4, Id::Site(()))],
+            clock: 0,
+        };
         assert_eq!(key, key);
     }
 
@@ -237,25 +289,40 @@ mod test {
         keys.insert(doc.start());
         keys.insert(doc.end());
 
+        let mut result = vec![];
+
         let mut rng = thread_rng();
 
         for _ in 0..100 {
             let new_key;
+            let i;
+            let value = rng.gen();
 
             // randomly pick adjacent keys
             {
                 let left;
                 let right;
                 {
-                    let i = rng.gen_range(0, keys.len() - 1);
+                    i = rng.gen_range(0, keys.len() - 1);
                     let mut iter = keys.iter().skip(i);
                     left = iter.next().unwrap();
                     right = iter.next().unwrap();
                 }
-                new_key = doc.insert(if rng.gen() { Alice } else { Bob }, left, right, rng.gen());
+                new_key = doc.insert(if rng.gen() { Alice } else { Bob }, left, right, value);
             }
 
             keys.insert(new_key);
+            result.insert(i, value);
+        }
+
+        let mut correct = result.iter();
+        let mut iter = doc.iter();
+        loop {
+            match (correct.next(), iter.next()) {
+                (None, None) => break,
+                (lhs, rhs) if lhs != rhs => panic!(),
+                _ => {}
+            }
         }
     }
 
