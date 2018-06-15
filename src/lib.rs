@@ -249,6 +249,10 @@ impl<SiteId: Ord + Clone + std::fmt::Debug, Value> Document<SiteId, Value> {
         key
     }
 
+    pub fn remove(&mut self, key: &Key<SiteId>) {
+        assert!(self.content.remove(key).is_some());
+    }
+
     pub fn iter<'a>(&'a self) -> impl Iterator<Item = &'a Value> {
         let start = self.start();
         let end = self.end();
@@ -293,26 +297,41 @@ mod test {
 
         let mut rng = thread_rng();
 
-        for _ in 0..100 {
-            let new_key;
-            let i;
-            let value = rng.gen();
+        for _ in 0..300 {
+            // insertion
+            if keys.len() <= 2 || rng.gen() {
+                let new_key;
+                let i;
+                let value = rng.gen();
 
-            // randomly pick adjacent keys
-            {
-                let left;
-                let right;
+                // randomly pick adjacent keys
                 {
-                    i = rng.gen_range(0, keys.len() - 1);
-                    let mut iter = keys.iter().skip(i);
-                    left = iter.next().unwrap();
-                    right = iter.next().unwrap();
+                    let left;
+                    let right;
+                    {
+                        i = rng.gen_range(0, keys.len() - 1);
+                        let mut iter = keys.iter().skip(i);
+                        left = iter.next().unwrap();
+                        right = iter.next().unwrap();
+                    }
+                    new_key = doc.insert(if rng.gen() { Alice } else { Bob }, left, right, value);
                 }
-                new_key = doc.insert(if rng.gen() { Alice } else { Bob }, left, right, value);
-            }
 
-            keys.insert(new_key);
-            result.insert(i, value);
+                keys.insert(new_key);
+                result.insert(i, value);
+            } else {
+                // removal
+                // randomly pick a key to remove
+                let i;
+                let key = {
+                    i = rng.gen_range(1, keys.len() - 1);
+                    keys.iter().skip(i).next().unwrap().clone()
+                };
+
+                doc.remove(&key);
+                keys.remove(&key);
+                result.remove(i - 1);
+            }
         }
 
         let mut correct = result.iter();
