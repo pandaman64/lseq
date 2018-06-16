@@ -74,9 +74,11 @@ impl<SiteId: Ord + Clone + fmt::Debug, Value> Document<SiteId, Value> {
                 v.insert(Some(value));
             }
             Occupied(o) => {
-                let (old, _) = o.remove_entry();
-                assert!(old.position == key.position && old.clock < key.clock);
-                self.content.insert(key.clone(), Some(value));
+                assert_eq!(&key, o.key());
+                if o.key().clock < key.clock {
+                    o.remove_entry();
+                    self.content.insert(key.clone(), Some(value));
+                }
             }
         }
         self.clock += 1;
