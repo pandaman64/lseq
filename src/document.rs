@@ -85,6 +85,10 @@ impl<SiteId: Ord + Clone + fmt::Debug, Value> Document<SiteId, Value> {
         key
     }
 
+    pub fn insert_at(&mut self, key: Key<SiteId>, value: Value) {
+        self.content.insert(key, Some(value));
+    }
+
     pub fn remove(&mut self, key: &Key<SiteId>) {
         assert!(self.content.remove(key).is_some());
     }
