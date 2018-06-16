@@ -89,8 +89,18 @@ impl<SiteId: Ord + Clone + fmt::Debug, Value> Document<SiteId, Value> {
         self.content.insert(key, Some(value));
     }
 
-    pub fn remove(&mut self, key: &Key<SiteId>) {
-        assert!(self.content.remove(key).is_some());
+    pub fn remove(&mut self, key: Key<SiteId>) {
+        use std::collections::btree_map::Entry::*;
+        let clock = key.clock;
+
+        match self.content.entry(key) {
+            Vacant(_) => {},
+            Occupied(o) => {
+                if o.key().clock == clock {
+                    o.remove_entry();
+                }
+            }
+        }
     }
 
     pub fn get(&self, key: &Key<SiteId>) -> Option<&Value> {
@@ -180,8 +190,8 @@ mod test {
                     keys.iter().skip(i).next().unwrap().clone()
                 };
 
-                doc.remove(&key);
                 keys.remove(&key);
+                doc.remove(key);
                 result.remove(i - 1);
             }
         }
